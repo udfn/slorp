@@ -32,7 +32,7 @@ deps = [
 conf_data = configuration_data()
 if jxl.found()
 	deps += jxl
-	conf_data.set('HAVE_JXL', 1)
 endif
+conf_data.set10('HAVE_JXL', jxl.found())
 configure_file(output: 'config.h', configuration:conf_data)
 executable('slorp', srcfiles, [proto_c, proto_h], dependencies: deps, install:true)

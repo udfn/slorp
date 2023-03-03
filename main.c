@@ -8,6 +8,7 @@
 #include <nwl/surface.h>
 #include <nwl/cairo.h>
 #include <nwl/shm.h>
+#include <nwl/seat.h>
 #include <sys/mman.h>
 #include <pixman.h>
 #include <fcntl.h>
