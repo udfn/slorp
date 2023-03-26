@@ -522,7 +522,7 @@ static struct nwl_renderer_impl bufferdisp_impl = {
 static void init_slorp_surface(struct nwl_state *state, struct nwl_output *output) {
 	struct nwl_surface *surf = nwl_surface_create(state, "slorp");
 	// Is it worth using egl for this?
-	nwl_surface_renderer_cairo(surf, false, slorp_sel_render);
+	nwl_surface_renderer_cairo(surf, slorp_sel_render, 0);
 	nwl_surface_role_layershell(surf, output->output, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY);
 	zwlr_layer_surface_v1_set_anchor(surf->role.layer.wl, 15); // all!
 	nwl_surface_set_size(surf, 0, 0);
