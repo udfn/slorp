@@ -208,12 +208,13 @@ static bool is_point_in_box(struct slorp_box *box, int32_t x, int32_t y) {
 		y >= box->y && y <= box->y+box->height;
 }
 
-static void slorp_sel_render(struct nwl_surface *surface, cairo_surface_t *cairo_surface) {
+static void slorp_sel_render(struct nwl_surface *surface, struct nwl_cairo_surface *cairo_surface) {
 	struct slorp_surface_state *slorp_surface = surface->userdata;
 	if (g_slorp.options.freeze_frame && !slorp_surface->has_bg) {
 		return; // no freezeframe, don't render yet!
 	}
-	cairo_t *cr = cairo_create(cairo_surface);
+	cairo_t *cr = cairo_surface->ctx;
+	cairo_identity_matrix(cr);
 	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
 	cairo_set_source_rgba(cr, 0.9, 0.9, 0.9, 0.145);
 	cairo_paint(cr);
@@ -326,7 +327,6 @@ static void slorp_sel_render(struct nwl_surface *surface, cairo_surface_t *cairo
 		cairo_move_to(cr, 20, 40);
 		cairo_show_text(cr, g_slorp.text);
 	}
-	cairo_destroy(cr);
 	nwl_surface_swapbuffers(surface, 0, 0);
 }
 
@@ -512,7 +512,6 @@ static void render_buffershow(struct nwl_surface *surface) {
 }
 
 static struct nwl_renderer_impl bufferdisp_impl = {
-	render_noop,
 	render_noop,
 	render_noop,
 	render_buffershow,
