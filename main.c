@@ -552,8 +552,11 @@ static bool handle_global_add(struct nwl_state *state, struct wl_registry *regis
 	return false;
 }
 
-static void handle_output_new(struct nwl_output *output) {
-	init_slorp_surface(output->state, output);
+static void handle_global_bound(uint32_t kind, void *data) {
+	if (kind == NWL_BOUND_GLOBAL_OUTPUT) {
+		struct nwl_output *output = data;
+		init_slorp_surface(output->state, output);
+	}
 }
 
 static void print_usage(const char *arg) {
@@ -754,7 +757,12 @@ cleanup:
 
 int main (int argc, char *argv[]) {
 	// why set app id when it's not even used?
-	struct nwl_state state = {.xdg_app_id = "slorp"};
+	struct nwl_state state = {
+		.xdg_app_id = "slorp",
+		.events = {
+			.global_bound = handle_global_bound
+		}
+	};
 	int opt;
 	// All the options from slurp are here, to be implemented eventually, maybe..
 	while ((opt = getopt(argc, argv, "XkhdonprlFO:b:c:s:B:w:f:m:")) != -1) {
@@ -801,7 +809,6 @@ int main (int argc, char *argv[]) {
 	if (!isatty(STDIN_FILENO)) {
 		process_input();
 	}
-	state.events.output_new = handle_output_new;
 	if (nwl_wayland_init(&state)) {
 		return EXIT_FAILURE;
 	}
