@@ -131,7 +131,7 @@ static void handle_screenframe_ready(void *data,
 	slorp_surface->shm_buffer = NULL;
 	struct wl_region *region = wl_compositor_create_region(slorp_surface->nwl.state->wl.compositor);
 	wl_region_add(region, 0, 0, slorp_surface->buffer_width, slorp_surface->buffer_height);
-	wl_surface_set_opaque_region(slorp_surface->nwl.wl.surface, region);
+	wl_surface_set_opaque_region(slorp_surface->bgsurface.wl.surface, region);
 	wl_region_destroy(region);
 	nwl_surface_set_need_draw(&slorp_surface->nwl, true);
 }
