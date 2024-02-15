@@ -755,6 +755,20 @@ cleanup:
 }
 #endif
 
+static char *strdupfilename(const char *src) {
+	unsigned long len = strlen(src);
+	char *dest = calloc(len+1, sizeof(char));
+	unsigned long dest_pos = 0;
+	for (unsigned long i = 0; i < len; i++) {
+		char cur = src[i];
+		if (cur == '/') {
+			continue;
+		}
+		dest[dest_pos++] = cur;
+	}
+	return dest;
+}
+
 int main (int argc, char *argv[]) {
 	// why set app id when it's not even used?
 	struct nwl_state state = {
@@ -873,7 +887,9 @@ int main (int argc, char *argv[]) {
 			char *extension = "png";
 			#endif
 			if (g_slorp.selected_box && g_slorp.selected_box->name) {
-				snprintf(filename, 511, "%s_%s.%s", g_slorp.options.output_file_name, g_slorp.selected_box->name, extension);
+				char *boxsafename = strdupfilename(g_slorp.selected_box->name);
+				snprintf(filename, 511, "%s_%s.%s", g_slorp.options.output_file_name, boxsafename, extension);
+				free(boxsafename);
 			} else {
 				snprintf(filename, 511, "%s.%s", g_slorp.options.output_file_name, extension);
 			}
