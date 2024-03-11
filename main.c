@@ -71,6 +71,7 @@ static struct slorp_state g_slorp = { 0 };
 struct slorp_surface_state {
 	struct zwlr_screencopy_frame_v1 *screenframe;
 	struct nwl_surface nwl;
+	struct nwl_cairo_renderer cairo;
 	uint32_t buffer_format;
 	uint32_t buffer_width;
 	uint32_t buffer_height;
@@ -125,7 +126,7 @@ static void handle_screenframe_ready(void *data,
 	struct slorp_surface_state *slorp_surface = data;
 	zwlr_screencopy_frame_v1_destroy(slorp_surface->screenframe);
 	slorp_surface->screenframe = NULL;
-	nwl_surface_render(&slorp_surface->bgsurface);
+	nwl_surface_update(&slorp_surface->bgsurface);
 	wl_buffer_destroy(slorp_surface->shm_buffer);
 	wl_shm_pool_destroy(slorp_surface->shm_pool);
 	slorp_surface->shm_buffer = NULL;
@@ -133,7 +134,7 @@ static void handle_screenframe_ready(void *data,
 	wl_region_add(region, 0, 0, slorp_surface->buffer_width, slorp_surface->buffer_height);
 	wl_surface_set_opaque_region(slorp_surface->bgsurface.wl.surface, region);
 	wl_region_destroy(region);
-	nwl_surface_set_need_draw(&slorp_surface->nwl, true);
+	nwl_surface_set_need_update(&slorp_surface->nwl, true);
 }
 
 static void handle_screenframe_failed(void *data,
@@ -204,11 +205,12 @@ static bool is_point_in_box(struct slorp_box *box, int32_t x, int32_t y) {
 		y >= box->y && y <= box->y+box->height;
 }
 
-static void slorp_sel_render(struct nwl_surface *surface, struct nwl_cairo_surface *cairo_surface) {
+static void slorp_sel_update(struct nwl_surface *surface) {
 	struct slorp_surface_state *slorp_surface = wl_container_of(surface, slorp_surface, nwl);
 	if (g_slorp.options.freeze_frame && !slorp_surface->has_bg) {
 		return; // no freezeframe, don't render yet!
 	}
+	struct nwl_cairo_surface *cairo_surface = nwl_cairo_renderer_get_surface(&slorp_surface->cairo, surface, false);
 	cairo_t *cr = cairo_surface->ctx;
 	cairo_identity_matrix(cr);
 	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
@@ -323,7 +325,7 @@ static void slorp_sel_render(struct nwl_surface *surface, struct nwl_cairo_surfa
 		cairo_move_to(cr, 20, 40);
 		cairo_show_text(cr, g_slorp.text);
 	}
-	nwl_surface_swapbuffers(surface, 0, 0);
+	nwl_cairo_renderer_submit(&slorp_surface->cairo, surface, 0, 0);
 }
 
 static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, struct nwl_pointer_event *event) {
@@ -475,7 +477,7 @@ static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, s
 			};
 			if (is_box_in_box(&sel_box, &outputexts) || is_box_in_box(&cur_exts, &outputexts)) {
 				scale = todirt->scale > scale ? todirt->scale : scale;
-				nwl_surface_set_need_draw(todirt, true);
+				nwl_surface_set_need_update(todirt, true);
 			}
 		}
 		g_slorp.selection_scale = scale;
@@ -488,14 +490,11 @@ static void handle_destroy(struct nwl_surface *surface) {
 		close(slorp_surface->shm_fd);
 		munmap(slorp_surface->shm_data, slorp_surface->shm_size);
 	}
+	nwl_cairo_renderer_finish(&slorp_surface->cairo);
 	free(slorp_surface);
 }
 
-static void render_noop() {
-	return;
-}
-
-static void render_buffershow(struct nwl_surface *surface) {
+static void update_bgsurface(struct nwl_surface *surface) {
 	struct slorp_surface_state *dat = wl_container_of(surface, dat, bgsurface);
 	if (dat->has_bg && !dat->shm_buffer) {
 		return;
@@ -507,17 +506,11 @@ static void render_buffershow(struct nwl_surface *surface) {
 	dat->has_bg = true;
 }
 
-static struct nwl_renderer_impl bufferdisp_impl = {
-	render_noop,
-	render_noop,
-	render_buffershow,
-	render_noop,
-};
 
 static void init_slorp_surface(struct nwl_state *state, struct nwl_output *output) {
 	struct slorp_surface_state *surface_state = calloc(sizeof(struct slorp_surface_state), 1);
 	nwl_surface_init(&surface_state->nwl, state, "slorp");
-	nwl_surface_renderer_cairo(&surface_state->nwl, slorp_sel_render, 0);
+	nwl_cairo_renderer_init(&surface_state->cairo);
 	nwl_surface_role_layershell(&surface_state->nwl, output->output, ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY);
 	zwlr_layer_surface_v1_set_anchor(surface_state->nwl.role.layer.wl, 15); // all!
 	nwl_surface_set_size(&surface_state->nwl, 0, 0);
@@ -527,6 +520,7 @@ static void init_slorp_surface(struct nwl_state *state, struct nwl_output *outpu
 	}
 	surface_state->nwl.impl.input_pointer = handle_pointer;
 	surface_state->nwl.impl.destroy = handle_destroy;
+	surface_state->nwl.impl.update = slorp_sel_update;
 	surface_state->output = output;
 	surface_state->nwl.flags |= NWL_SURFACE_FLAG_NO_AUTOCURSOR;
 	surface_state->nwl.scale = output->scale;
@@ -535,7 +529,7 @@ static void init_slorp_surface(struct nwl_state *state, struct nwl_output *outpu
 		surface_state->bgsurface.scale = output->scale;
 		nwl_surface_role_subsurface(&surface_state->bgsurface, &surface_state->nwl);
 		wl_subsurface_place_below(surface_state->bgsurface.role.subsurface.wl, surface_state->nwl.wl.surface);
-		surface_state->bgsurface.render.impl = &bufferdisp_impl;
+		surface_state->bgsurface.impl.update = update_bgsurface;
 		surface_state->screenframe = zwlr_screencopy_manager_v1_capture_output(g_slorp.screencopy, 0, output->output);
 		zwlr_screencopy_frame_v1_add_listener(surface_state->screenframe, &screenframe_listener, surface_state);
 	}
