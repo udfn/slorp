@@ -359,11 +359,13 @@ static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, s
 			}
 			g_slorp.selecting = false;
 			g_slorp.has_selection = true;
-			// end!
+			g_slorp.mouse_down = false;
 			surface->state->num_surfaces = 0;
+			return;
 		} else if (!(event->buttons & NWL_MOUSE_RIGHT) && (event->buttons_prev & NWL_MOUSE_RIGHT)) {
 			// rmb: abort
 			surface->state->num_surfaces = 0;
+			return;
 		}
 		g_slorp.moving_selection = event->buttons & NWL_MOUSE_MIDDLE;
 	}
