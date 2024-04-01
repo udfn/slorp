@@ -331,6 +331,10 @@ static void slorp_sel_update(struct nwl_surface *surface) {
 static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, struct nwl_pointer_event *event) {
 	struct slorp_surface_state *slorp_surface = wl_container_of(surface, slorp_surface, nwl);
 	bool redraw = false;
+	// Hack: do nothing if we're done
+	if (surface->state->num_surfaces == 0) {
+		return;
+	}
 	if (event->changed & NWL_POINTER_EVENT_FOCUS && event->focus) {
 		nwl_seat_set_pointer_cursor(seat, "cross");
 	}
