@@ -50,6 +50,7 @@ struct slorp_state {
 	bool mouse_down;
 	bool moving_selection;
 	bool has_selection;
+	bool has_received_input;
 	const char *text;
 	struct slorp_box *boxes; // array of slorp_box
 	size_t boxes_amount; // amount of boxes
@@ -213,6 +214,12 @@ static void slorp_sel_update(struct nwl_surface *surface) {
 	struct nwl_cairo_surface *cairo_surface = nwl_cairo_renderer_get_surface(&slorp_surface->cairo, surface, false);
 	cairo_t *cr = cairo_surface->ctx;
 	cairo_identity_matrix(cr);
+	if (g_slorp.boxes_amount > 0 && !g_slorp.has_received_input) {
+		cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+		cairo_paint(cr);
+		nwl_cairo_renderer_submit(&slorp_surface->cairo, surface, 0, 0);
+		return;
+	}
 	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
 	cairo_set_source_rgba(cr, 0.9, 0.9, 0.9, 0.145);
 	cairo_paint(cr);
@@ -336,6 +343,10 @@ static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, s
 		return;
 	}
 	if (event->changed & NWL_POINTER_EVENT_FOCUS && event->focus) {
+		if (!g_slorp.has_received_input && g_slorp.boxes_amount > 0) {
+			g_slorp.has_received_input = true;
+			nwl_surface_set_need_update(surface, false);
+		}
 		nwl_seat_set_pointer_cursor(seat, "cross");
 	}
 	struct slorp_box cur_exts = {
