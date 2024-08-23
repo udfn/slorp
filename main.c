@@ -552,9 +552,9 @@ static bool handle_global_add(struct nwl_state *state, struct wl_registry *regis
 	return false;
 }
 
-static void handle_global_bound(uint32_t kind, void *data) {
-	if (kind == NWL_BOUND_GLOBAL_OUTPUT) {
-		struct nwl_output *output = data;
+static void handle_global_bound(const struct nwl_bound_global *global) {
+	if (global->kind == NWL_BOUND_GLOBAL_OUTPUT) {
+		struct nwl_output *output = global->global.output;
 		init_slorp_surface(output->state, output);
 	}
 }
