@@ -12,7 +12,6 @@
 #include <sys/mman.h>
 #include <pixman.h>
 #include <fcntl.h>
-#include <errno.h>
 #include <unistd.h>
 #include <pixman.h>
 #include <png.h>
@@ -22,7 +21,6 @@
 #include <jxl/encode.h>
 #endif
 
-#include "xdg-shell.h"
 #include "wlr-layer-shell-unstable-v1.h"
 #include "wlr-screencopy-unstable-v1.h"
 
@@ -56,6 +54,7 @@ struct slorp_state {
 	size_t boxes_amount; // amount of boxes
 	struct slorp_box *selected_box;
 	uint32_t selection_scale;
+	uint32_t text_vis_length;
 	struct {
 		bool freeze_frame;
 		bool show_dimensions;
@@ -81,6 +80,7 @@ struct slorp_surface_state {
 
 	int shm_fd;
 	bool has_bg;
+	bool text_on_other_side;
 	struct wl_shm_pool *shm_pool;
 	size_t shm_size;
 	uint8_t *shm_data;
@@ -325,11 +325,15 @@ static void slorp_sel_update(struct nwl_surface *surface) {
 		cairo_text_extents_t exts;
 		cairo_text_extents(cr, g_slorp.text, &exts);
 		exts.x_advance += 6;
-		cairo_set_source_rgba(cr, 0.05, 0.05, 0.05, 0.75);
-		cairo_rectangle(cr, 18, 20, exts.x_advance, 28);
+		if (g_slorp.text_vis_length == 0) {
+			g_slorp.text_vis_length = exts.x_advance;
+		}
+		cairo_set_source_rgba(cr, 0.05, 0.05, 0.05, 0.66);
+		double text_base = slorp_surface->text_on_other_side ? surface->width - (20 + exts.x_advance) : 18;
+		cairo_rectangle(cr, text_base, 20, exts.x_advance, 28);
 		cairo_fill(cr);
-		cairo_set_source_rgba(cr, 0.85, 0.85, 0.85, 0.97);
-		cairo_move_to(cr, 20, 40);
+		cairo_set_source_rgba(cr, 0.85, 0.85, 0.85, 0.96);
+		cairo_move_to(cr, text_base + 2, 40);
 		cairo_show_text(cr, g_slorp.text);
 	}
 	nwl_cairo_renderer_submit(&slorp_surface->cairo, surface, 0, 0);
@@ -342,12 +346,17 @@ static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, s
 	if (surface->state->num_surfaces == 0) {
 		return;
 	}
-	if (event->changed & NWL_POINTER_EVENT_FOCUS && event->focus) {
-		if (!g_slorp.has_received_input && g_slorp.boxes_amount > 0) {
-			g_slorp.has_received_input = true;
+	if (event->changed & NWL_POINTER_EVENT_FOCUS) {
+		if (event->focus) {
+			if (!g_slorp.has_received_input && g_slorp.boxes_amount > 0) {
+				g_slorp.has_received_input = true;
+				nwl_surface_set_need_update(surface, false);
+			}
+			nwl_seat_set_pointer_cursor(seat, "cross");
+		} else if (slorp_surface->text_on_other_side) {
+			slorp_surface->text_on_other_side = false;
 			nwl_surface_set_need_update(surface, false);
 		}
-		nwl_seat_set_pointer_cursor(seat, "cross");
 	}
 	struct slorp_box cur_exts = {
 		.x = g_slorp.selection.x,
@@ -385,9 +394,9 @@ static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, s
 		g_slorp.moving_selection = event->buttons & NWL_MOUSE_MIDDLE;
 	}
 	if (event->changed & NWL_POINTER_EVENT_MOTION) {
+		int32_t x = wl_fixed_to_int(event->surface_x);
+		int32_t y = wl_fixed_to_int(event->surface_y);
 		if (g_slorp.mouse_down) {
-			int32_t x = wl_fixed_to_int(event->surface_x);
-			int32_t y = wl_fixed_to_int(event->surface_y);
 			if (g_slorp.options.constrain_to_output) {
 				if (x < 0) {
 					x = 0;
@@ -457,6 +466,15 @@ static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, s
 					g_slorp.selection.y2 = g_slorp.selected_box->height + g_slorp.selection.y;
 				}
 				redraw = true;
+			}
+		}
+		if (g_slorp.text) {
+			if (y < 80 && x < 60 + g_slorp.text_vis_length && slorp_surface->text_on_other_side == false) {
+				slorp_surface->text_on_other_side = true;
+				nwl_surface_set_need_update(surface, false);
+			} else if ((y > 80 || x > 60 + g_slorp.text_vis_length) && slorp_surface->text_on_other_side == true) {
+				slorp_surface->text_on_other_side = false;
+				nwl_surface_set_need_update(surface, false);
 			}
 		}
 	}
