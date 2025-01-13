@@ -34,6 +34,13 @@ struct slorp_box {
 	char *name;
 };
 
+struct slorp_color {
+	uint16_t red;
+	uint16_t green;
+	uint16_t blue;
+	uint16_t max;
+};
+
 struct slorp_exts {
 	int32_t x;
 	int32_t y;
@@ -62,6 +69,7 @@ struct slorp_state {
 		bool constrain_to_output;
 		bool output_box_name;
 		bool jxl;
+		bool color_select;
 		const char *output_file_name; // don't free!
 	} options;
 };
@@ -206,6 +214,38 @@ static bool is_point_in_box(struct slorp_box *box, int32_t x, int32_t y) {
 		y >= box->y && y <= box->y+box->height;
 }
 
+static void slorp_surface_get_color_at(struct slorp_surface_state *slorp_surface, uint32_t x, uint32_t y, struct slorp_color *out) {
+	double scale = (double)slorp_surface->buffer_width / (double)slorp_surface->output->width;
+	// This assumes each pixel is 32 bits, which is bad!
+	x *= scale;
+	y *= scale;
+	uint32_t selected_pix = ((uint32_t*)slorp_surface->shm_data)[x + (y*slorp_surface->buffer_width)];
+	uint8_t bpc = 8;
+	bool flip_rb = false;
+	switch (slorp_surface->buffer_format) {
+	case WL_SHM_FORMAT_XRGB8888: break;
+	case WL_SHM_FORMAT_XBGR8888:
+		flip_rb = true;
+		break;
+	case WL_SHM_FORMAT_XRGB2101010:
+		bpc = 10;
+		break;
+	case WL_SHM_FORMAT_XBGR2101010:
+		bpc = 10;
+		flip_rb = true;
+		break;
+	}
+	out->max = (1 << bpc) -1;
+	out->blue = (selected_pix) & out->max;
+	out->green = (selected_pix >> bpc) & out->max;
+	out->red = (selected_pix >> bpc*2) & out->max;
+	if (flip_rb) {
+		unsigned int stored = out->red;
+		out->red = out->blue;
+		out->blue = stored;
+	}
+}
+
 static void slorp_sel_update(struct nwl_surface *surface) {
 	struct slorp_surface_state *slorp_surface = wl_container_of(surface, slorp_surface, nwl);
 	if (g_slorp.options.freeze_frame && !slorp_surface->has_bg) {
@@ -220,11 +260,65 @@ static void slorp_sel_update(struct nwl_surface *surface) {
 		nwl_cairo_renderer_submit(&slorp_surface->cairo, surface, 0, 0);
 		return;
 	}
-	cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
-	cairo_set_source_rgba(cr, 0.9, 0.9, 0.9, 0.145);
-	cairo_paint(cr);
+	if (!g_slorp.options.color_select) {
+		cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+		cairo_set_source_rgba(cr, 0.9, 0.9, 0.9, 0.145);
+		cairo_paint(cr);
+	} else {
+		cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+		cairo_paint(cr);
+	}
+	cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
 	cairo_identity_matrix(cr);
 	cairo_scale(cr, surface->scale, surface->scale);
+	if (g_slorp.options.color_select) {
+		struct slorp_box outputbox = {
+			.x = slorp_surface->output->x,
+			.y = slorp_surface->output->y,
+			.width = slorp_surface->output->width,
+			.height = slorp_surface->output->height
+		};
+		if (is_point_in_box(&outputbox, g_slorp.selection.x, g_slorp.selection.y)) {
+			// do stuff..
+			uint32_t local_x = g_slorp.selection.x - outputbox.x;
+			uint32_t local_y = g_slorp.selection.y - outputbox.y;
+			double cb_x = (g_slorp.selection.x - outputbox.x) + 15;
+			double cb_y = (g_slorp.selection.y - outputbox.y) + 15;
+			if ((cb_x + 80) > outputbox.width) {
+				cb_x -= 95;
+			}
+			if ((cb_y + 80) > outputbox.height) {
+				cb_y -= 102;
+			}
+			cairo_rectangle(cr, cb_x, cb_y, 60, 67);
+			struct slorp_color color;
+			slorp_surface_get_color_at(slorp_surface, local_x, local_y, &color);
+			double max = (double)color.max;
+			cairo_set_source_rgba(cr, 0.1, 0.1, 0.1, 0.6);
+			cairo_stroke_preserve(cr);
+			cairo_set_source_rgba(cr, (double)color.red/max, (double)color.green/max, (double)color.blue/max, 1.0);
+			cairo_fill(cr);
+			cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.7);
+			cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+			cairo_rectangle(cr, cb_x, cb_y + 20, 60, 47);
+			cairo_fill(cr);
+			cairo_select_font_face(cr, "monospace", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+			cairo_set_font_size(cr, 14);
+			cairo_move_to(cr, cb_x + 2, cb_y + 34);
+			char buf[128];
+			snprintf(buf, 127, "%d", color.red);
+			cairo_set_source_rgba(cr, 1.0, 0.75, 0.75, 1.0);
+			cairo_show_text(cr, buf);
+			snprintf(buf, 127, "%d", color.green);
+			cairo_move_to(cr, cb_x + 2, cb_y + 34 + (14));
+			cairo_set_source_rgba(cr, 0.75, 1.0, 0.75, 1.0);
+			cairo_show_text(cr, buf);
+			snprintf(buf, 127, "%d", color.blue);
+			cairo_move_to(cr, cb_x + 2, cb_y + 34 + (14*2));
+			cairo_set_source_rgba(cr, 0.75, 0.75, 1.0, 1.0);
+			cairo_show_text(cr, buf);
+		}
+	}
 	if (g_slorp.selecting || g_slorp.selected_box) {
 		struct slorp_box outputbox = {
 			.x = slorp_surface->output->x,
@@ -339,25 +433,7 @@ static void slorp_sel_update(struct nwl_surface *surface) {
 	nwl_cairo_renderer_submit(&slorp_surface->cairo, surface, 0, 0);
 }
 
-static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, struct nwl_pointer_event *event) {
-	struct slorp_surface_state *slorp_surface = wl_container_of(surface, slorp_surface, nwl);
-	bool redraw = false;
-	// Hack: do nothing if we're done
-	if (surface->state->num_surfaces == 0) {
-		return;
-	}
-	if (event->changed & NWL_POINTER_EVENT_FOCUS) {
-		if (event->focus) {
-			if (!g_slorp.has_received_input && g_slorp.boxes_amount > 0) {
-				g_slorp.has_received_input = true;
-				nwl_surface_set_need_update(surface, false);
-			}
-			nwl_seat_set_pointer_cursor(seat, "cross");
-		} else if (slorp_surface->text_on_other_side) {
-			slorp_surface->text_on_other_side = false;
-			nwl_surface_set_need_update(surface, false);
-		}
-	}
+static void maybe_redraw_surfaces(struct nwl_state *nwl) {
 	struct slorp_box cur_exts = {
 		.x = g_slorp.selection.x,
 		.width = g_slorp.selection.x2,
@@ -365,6 +441,50 @@ static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, s
 		.height = g_slorp.selection.y2,
 	};
 
+	struct nwl_surface *todirt;
+	struct slorp_box sel_box = {
+		.x = g_slorp.selection.x,
+		.y = g_slorp.selection.y,
+		.width = g_slorp.selection.x2,
+		.height = g_slorp.selection.y2
+	};
+	get_rectangle(&sel_box.x, &sel_box.y, &sel_box.width, &sel_box.height);
+	// See if we're selecting in a box
+	if (g_slorp.mouse_down && g_slorp.boxes_amount) {
+		// midpoint
+		int32_t x = sel_box.x + sel_box.width/2;
+		int32_t y = sel_box.y + sel_box.height/2;
+		for (size_t i = g_slorp.boxes_amount; i > 0; i--) {
+			struct slorp_box *box = &g_slorp.boxes[i-1];
+			if (is_point_in_box(box, x, y)) {
+				g_slorp.selected_box = box;
+				break;
+			}
+		}
+	}
+	get_rectangle(&cur_exts.x, &cur_exts.y, &cur_exts.width, &cur_exts.height);
+	uint32_t scale = 1;
+	wl_list_for_each(todirt, &nwl->surfaces, link) {
+		struct slorp_surface_state *todirtstate = wl_container_of(todirt, todirtstate, nwl);
+		struct slorp_box outputexts = {
+			.x = todirtstate->output->x,
+			.y = todirtstate->output->y,
+			.width = todirtstate->output->width,
+			.height = todirtstate->output->height,
+		};
+		if (is_box_in_box(&sel_box, &outputexts) || is_box_in_box(&cur_exts, &outputexts)) {
+			scale = todirt->scale > scale ? todirt->scale : scale;
+			nwl_surface_set_need_update(todirt, true);
+		}
+	}
+	g_slorp.selection_scale = scale;
+}
+
+static void handle_pointer_rectangle(struct slorp_surface_state *slorp_surface, struct nwl_seat *seat, struct nwl_pointer_event *event) {
+	bool redraw = false;
+	if (event->changed & NWL_POINTER_EVENT_FOCUS && g_slorp.boxes_amount > 0 && !event->focus) {
+		nwl_surface_set_need_update(&slorp_surface->nwl, false);
+	}
 	if (event->changed & NWL_POINTER_EVENT_BUTTON) {
 		 if (event->buttons & NWL_MOUSE_LEFT && !g_slorp.mouse_down) {
 			g_slorp.mouse_down = true;
@@ -384,11 +504,7 @@ static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, s
 			g_slorp.selecting = false;
 			g_slorp.has_selection = true;
 			g_slorp.mouse_down = false;
-			surface->state->num_surfaces = 0;
-			return;
-		} else if (!(event->buttons & NWL_MOUSE_RIGHT) && (event->buttons_prev & NWL_MOUSE_RIGHT)) {
-			// rmb: abort
-			surface->state->num_surfaces = 0;
+			slorp_surface->nwl.state->num_surfaces = 0;
 			return;
 		}
 		g_slorp.moving_selection = event->buttons & NWL_MOUSE_MIDDLE;
@@ -400,21 +516,21 @@ static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, s
 			if (g_slorp.options.constrain_to_output) {
 				if (x < 0) {
 					x = 0;
-				} else if (x > (int32_t)surface->width) {
-					x = surface->width;
+				} else if (x > (int32_t)slorp_surface->nwl.width) {
+					x = slorp_surface->nwl.width;
 				}
 				if (y < 0) {
 					y = 0;
-				} else if (y > (int32_t)surface->height) {
-					y = surface->height;
+				} else if (y > (int32_t)slorp_surface->nwl.height) {
+					y = slorp_surface->nwl.height;
 				}
 			}
 			// ugly hack so the whole screen is selectable :/
-			if (x == (int32_t)surface->width-1) {
-				x = surface->width;
+			if (x == (int32_t)slorp_surface->nwl.width-1) {
+				x = slorp_surface->nwl.width;
 			}
-			if (y == (int32_t)surface->height-1) {
-				y = surface->height;
+			if (y == (int32_t)slorp_surface->nwl.height-1) {
+				y = slorp_surface->nwl.height;
 			}
 			if (g_slorp.moving_selection) {
 				g_slorp.selection.x += x + slorp_surface->output->x - g_slorp.selection.x2;
@@ -471,51 +587,77 @@ static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, s
 		if (g_slorp.text) {
 			if (y < 80 && x < 60 + g_slorp.text_vis_length && slorp_surface->text_on_other_side == false) {
 				slorp_surface->text_on_other_side = true;
-				nwl_surface_set_need_update(surface, false);
+				nwl_surface_set_need_update(&slorp_surface->nwl, false);
 			} else if ((y > 80 || x > 60 + g_slorp.text_vis_length) && slorp_surface->text_on_other_side == true) {
 				slorp_surface->text_on_other_side = false;
-				nwl_surface_set_need_update(surface, false);
+				nwl_surface_set_need_update(&slorp_surface->nwl, false);
 			}
 		}
 	}
 	if (redraw) {
-		struct nwl_surface *todirt;
-		struct slorp_box sel_box = {
-			.x = g_slorp.selection.x,
-			.y = g_slorp.selection.y,
-			.width = g_slorp.selection.x2,
-			.height = g_slorp.selection.y2
-		};
-		get_rectangle(&sel_box.x, &sel_box.y, &sel_box.width, &sel_box.height);
-		// See if we're selecting in a box
-		if (g_slorp.mouse_down && g_slorp.boxes_amount) {
-			// midpoint
-			int32_t x = sel_box.x + sel_box.width/2;
-			int32_t y = sel_box.y + sel_box.height/2;
-			for (size_t i = g_slorp.boxes_amount; i > 0; i--) {
-				struct slorp_box *box = &g_slorp.boxes[i-1];
-				if (is_point_in_box(box, x, y)) {
-					g_slorp.selected_box = box;
-					break;
-				}
+		maybe_redraw_surfaces(slorp_surface->nwl.state);
+	}
+}
+
+static void handle_pointer_color(struct slorp_surface_state *slorp_surface, struct nwl_seat *seat, struct nwl_pointer_event *event) {
+	if (event->changed & NWL_POINTER_EVENT_BUTTON) {
+		if (!(event->buttons & NWL_MOUSE_RIGHT) && event->buttons_prev & NWL_MOUSE_LEFT) {
+			// selected... something.
+			g_slorp.has_selection = true;
+			g_slorp.mouse_down = false;
+			g_slorp.selection.x = wl_fixed_to_int(event->surface_x) + slorp_surface->output->x;
+			g_slorp.selection.y = wl_fixed_to_int(event->surface_y) + slorp_surface->output->y;
+			slorp_surface->nwl.state->num_surfaces = 0;
+			return;
+		}
+	}
+	if (event->changed & NWL_POINTER_EVENT_MOTION) {
+		g_slorp.selection.x = wl_fixed_to_int(event->surface_x) + slorp_surface->output->x;
+		g_slorp.selection.y = wl_fixed_to_int(event->surface_y) + slorp_surface->output->y;
+		g_slorp.selection.x2 = g_slorp.selection.x+1;
+		g_slorp.selection.y2 = g_slorp.selection.y+1;
+		if (g_slorp.text) {
+			if (g_slorp.selection.y < 80 && g_slorp.selection.x < 60 + g_slorp.text_vis_length && slorp_surface->text_on_other_side == false) {
+				slorp_surface->text_on_other_side = true;
+				nwl_surface_set_need_update(&slorp_surface->nwl, false);
+			} else if ((g_slorp.selection.y > 80 || g_slorp.selection.x > 60 + g_slorp.text_vis_length) && slorp_surface->text_on_other_side == true) {
+				slorp_surface->text_on_other_side = false;
+				nwl_surface_set_need_update(&slorp_surface->nwl, false);
 			}
 		}
-		get_rectangle(&cur_exts.x, &cur_exts.y, &cur_exts.width, &cur_exts.height);
-		uint32_t scale = 1;
-		wl_list_for_each(todirt, &surface->state->surfaces, link) {
-			struct slorp_surface_state *todirtstate = wl_container_of(surface, slorp_surface, nwl);
-			struct slorp_box outputexts = {
-				.x = todirtstate->output->x,
-				.y = todirtstate->output->y,
-				.width = todirtstate->output->width,
-				.height = todirtstate->output->height,
-			};
-			if (is_box_in_box(&sel_box, &outputexts) || is_box_in_box(&cur_exts, &outputexts)) {
-				scale = todirt->scale > scale ? todirt->scale : scale;
-				nwl_surface_set_need_update(todirt, true);
+		maybe_redraw_surfaces(slorp_surface->nwl.state);
+	}
+}
+
+static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, struct nwl_pointer_event *event) {
+	struct slorp_surface_state *slorp_surface = wl_container_of(surface, slorp_surface, nwl);
+	// Hack: do nothing if we're done
+	if (surface->state->num_surfaces == 0) {
+		return;
+	}
+	if (event->changed & NWL_POINTER_EVENT_FOCUS) {
+		if (event->focus) {
+			if (!g_slorp.has_received_input && g_slorp.boxes_amount > 0) {
+				g_slorp.has_received_input = true;
+				nwl_surface_set_need_update(surface, false);
 			}
+			nwl_seat_set_pointer_cursor(seat, "cross");
+		} else if (slorp_surface->text_on_other_side) {
+			slorp_surface->text_on_other_side = false;
+			nwl_surface_set_need_update(surface, false);
 		}
-		g_slorp.selection_scale = scale;
+	}
+	if (event->changed & NWL_POINTER_EVENT_BUTTON) {
+		if (!(event->buttons & NWL_MOUSE_RIGHT) && (event->buttons_prev & NWL_MOUSE_RIGHT)) {
+			// Right mouse button always abortd
+			slorp_surface->nwl.state->num_surfaces = 0;
+			return;
+		}
+	}
+	if (g_slorp.options.color_select) {
+		handle_pointer_color(slorp_surface, seat, event);
+	} else {
+		handle_pointer_rectangle(slorp_surface, seat, event);
 	}
 }
 
@@ -539,6 +681,7 @@ static void update_bgsurface(struct nwl_surface *surface) {
 	wl_surface_damage_buffer(surface->wl.surface, 0, 0, INT32_MAX, INT32_MAX);
 	wl_surface_commit(surface->wl.surface);
 	dat->has_bg = true;
+	surface->scale = dat->nwl.scale;
 }
 
 
@@ -597,6 +740,7 @@ static void print_usage(const char *arg) {
 	puts( "-k           Don't take keyboard input.");
 	puts( "-l           Constrain selection to one output.");
 	puts( "-O filename  Save capture to this file. Implies -F.");
+	puts( "-C           Color selection mode. Implies -F.");
 #if HAVE_JXL
 	puts( "-X           Save capture in JPEG XL format.");
 #endif
@@ -807,8 +951,7 @@ int main (int argc, char *argv[]) {
 		}
 	};
 	int opt;
-	// All the options from slurp are here, to be implemented eventually, maybe..
-	while ((opt = getopt(argc, argv, "XkhdonprlFO:b:c:s:B:w:f:m:")) != -1) {
+	while ((opt = getopt(argc, argv, "XCkhndlFO:m:")) != -1) {
 		switch (opt) {
 			case 'h':
 				print_usage(argv[0]);
@@ -834,6 +977,11 @@ int main (int argc, char *argv[]) {
 				state.events.global_add = handle_global_add;
 				g_slorp.options.freeze_frame = true;
 				break;
+			case 'C':
+				g_slorp.options.color_select = true;
+				state.events.global_add = handle_global_add;
+				g_slorp.options.freeze_frame = true;
+				break;
 			case 'X':
 			#if HAVE_JXL
 				g_slorp.options.jxl = true;
@@ -843,10 +991,8 @@ int main (int argc, char *argv[]) {
 			#endif
 				break;
 			case '?':
+				print_usage(argv[0]);
 				return EXIT_FAILURE;
-			default:
-				fprintf(stderr, "option %c not yet implemented..\n", opt);
-				break;
 		}
 	}
 	if (!isatty(STDIN_FILENO)) {
@@ -869,8 +1015,32 @@ int main (int argc, char *argv[]) {
 			.width = g_slorp.selection.x2,
 			.height = g_slorp.selection.y2
 		};
+
 		get_rectangle(&selectionbox.x, &selectionbox.y, &selectionbox.width, &selectionbox.height);
-		if (g_slorp.options.output_file_name) {
+		if (g_slorp.options.color_select) {
+			int x = g_slorp.selection.x;
+			int y = g_slorp.selection.y;
+			struct nwl_surface *surf;
+			wl_list_for_each(surf, &state.surfaces, link) {
+				struct slorp_surface_state *slorp_surface = wl_container_of(surf, slorp_surface, nwl);
+				struct slorp_box outputbox = {
+					.x = slorp_surface->output->x,
+					.y = slorp_surface->output->y,
+					.width = slorp_surface->output->width,
+					.height = slorp_surface->output->height
+				};
+				if (is_point_in_box(&outputbox, x, y)) {
+					x -= outputbox.x;
+					y -= outputbox.y;
+					if (x > 0 || y > 0) {
+						struct slorp_color color;
+						slorp_surface_get_color_at(slorp_surface, x, y, &color);
+						printf("%d %d %d %d\n", color.max, color.red, color.green, color.blue);
+					}
+					break;
+				}
+			}
+		} else if (g_slorp.options.output_file_name) {
 			uint32_t scaled_width = 0;
 			uint32_t scaled_height = 0;
 			scale_image_size(&state, &selectionbox, &scaled_width, &scaled_height);
