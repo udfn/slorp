@@ -23,6 +23,8 @@
 
 #include "wlr-layer-shell-unstable-v1.h"
 #include "wlr-screencopy-unstable-v1.h"
+#include "ext-image-capture-source-v1.h"
+#include "ext-image-copy-capture-v1.h"
 
 #define min(a,b) a > b ? b : a
 
@@ -50,6 +52,8 @@ struct slorp_exts {
 
 struct slorp_state {
 	struct zwlr_screencopy_manager_v1 *screencopy;
+	struct ext_image_copy_capture_manager_v1 *copy_capture;
+	struct ext_output_image_capture_source_manager_v1 *output_capture;
 	struct slorp_exts selection;
 	bool selecting;
 	bool mouse_down;
@@ -78,6 +82,9 @@ static struct slorp_state g_slorp = { 0 };
 
 struct slorp_surface_state {
 	struct zwlr_screencopy_frame_v1 *screenframe;
+	struct ext_image_copy_capture_session_v1 *copysession;
+	struct ext_image_copy_capture_frame_v1 *copyframe;
+
 	struct nwl_surface nwl;
 	struct nwl_cairo_renderer cairo;
 	uint32_t buffer_format;
@@ -88,6 +95,7 @@ struct slorp_surface_state {
 
 	int shm_fd;
 	bool has_bg;
+	bool valid_format;
 	bool text_on_other_side;
 	struct wl_shm_pool *shm_pool;
 	size_t shm_size;
@@ -98,6 +106,18 @@ struct slorp_surface_state {
 	struct nwl_output *output;
 };
 
+static void freezeframe_ready(struct slorp_surface_state *slorp_surface) {
+	nwl_surface_update(&slorp_surface->bgsurface);
+	wl_buffer_destroy(slorp_surface->shm_buffer);
+	wl_shm_pool_destroy(slorp_surface->shm_pool);
+	slorp_surface->shm_buffer = NULL;
+	struct wl_region *region = wl_compositor_create_region(slorp_surface->nwl.state->wl.compositor);
+	wl_region_add(region, 0, 0, slorp_surface->buffer_width, slorp_surface->buffer_height);
+	wl_surface_set_opaque_region(slorp_surface->bgsurface.wl.surface, region);
+	wl_region_destroy(region);
+	nwl_surface_set_need_update(&slorp_surface->nwl, true);
+
+}
 
 static void destroy_shm_pool(struct slorp_surface_state *slorpsurf) {
 	if (slorpsurf->shm_fd) {
@@ -110,6 +130,18 @@ static void destroy_shm_pool(struct slorp_surface_state *slorpsurf) {
 		close(slorpsurf->shm_fd);
 		slorpsurf->shm_fd = 0;
 	}
+}
+
+static void allocate_capture_buffer(struct slorp_surface_state *slorp_surface) {
+	size_t pool_size = slorp_surface->buffer_height * slorp_surface->buffer_stride;
+	if (pool_size != slorp_surface->shm_size) {
+		destroy_shm_pool(slorp_surface);
+		slorp_surface->shm_fd = nwl_allocate_shm_file(pool_size);
+		slorp_surface->shm_data = mmap(NULL, pool_size, PROT_READ|PROT_WRITE, MAP_SHARED, slorp_surface->shm_fd, 0);
+		slorp_surface->shm_pool = wl_shm_create_pool(slorp_surface->nwl.state->wl.shm, slorp_surface->shm_fd, pool_size);
+		slorp_surface->shm_size = pool_size;
+	}
+	slorp_surface->shm_buffer = wl_shm_pool_create_buffer(slorp_surface->shm_pool, 0, slorp_surface->buffer_width, slorp_surface->buffer_height, slorp_surface->buffer_stride, slorp_surface->buffer_format);
 }
 
 static void handle_screenframe_buffer(void *data,
@@ -135,15 +167,7 @@ static void handle_screenframe_ready(void *data,
 	struct slorp_surface_state *slorp_surface = data;
 	zwlr_screencopy_frame_v1_destroy(slorp_surface->screenframe);
 	slorp_surface->screenframe = NULL;
-	nwl_surface_update(&slorp_surface->bgsurface);
-	wl_buffer_destroy(slorp_surface->shm_buffer);
-	wl_shm_pool_destroy(slorp_surface->shm_pool);
-	slorp_surface->shm_buffer = NULL;
-	struct wl_region *region = wl_compositor_create_region(slorp_surface->nwl.state->wl.compositor);
-	wl_region_add(region, 0, 0, slorp_surface->buffer_width, slorp_surface->buffer_height);
-	wl_surface_set_opaque_region(slorp_surface->bgsurface.wl.surface, region);
-	wl_region_destroy(region);
-	nwl_surface_set_need_update(&slorp_surface->nwl, true);
+	freezeframe_ready(slorp_surface);
 }
 
 static void handle_screenframe_failed(void *data,
@@ -166,15 +190,7 @@ static void handle_screenframe_buffer_done(void *data,
 		struct zwlr_screencopy_frame_v1 *frame) {
 	// Keep it stupid simple, don't do dmabuf.. yet
 	struct slorp_surface_state *slorp_surface = data;
-	size_t pool_size = slorp_surface->buffer_height * slorp_surface->buffer_stride;
-	if (pool_size != slorp_surface->shm_size) {
-		destroy_shm_pool(slorp_surface);
-		slorp_surface->shm_fd = nwl_allocate_shm_file(pool_size);
-		slorp_surface->shm_data = mmap(NULL, pool_size, PROT_READ|PROT_WRITE, MAP_SHARED, slorp_surface->shm_fd, 0);
-		slorp_surface->shm_pool = wl_shm_create_pool(slorp_surface->nwl.state->wl.shm, slorp_surface->shm_fd, pool_size);
-		slorp_surface->shm_size = pool_size;
-	}
-	slorp_surface->shm_buffer = wl_shm_pool_create_buffer(slorp_surface->shm_pool, 0, slorp_surface->buffer_width, slorp_surface->buffer_height, slorp_surface->buffer_stride, slorp_surface->buffer_format);
+	allocate_capture_buffer(slorp_surface);
 	zwlr_screencopy_frame_v1_copy(frame, slorp_surface->shm_buffer);
 }
 
@@ -186,6 +202,110 @@ static struct zwlr_screencopy_frame_v1_listener screenframe_listener = {
 	handle_screenframe_damage,
 	handle_screenframe_linux_dmabuf,
 	handle_screenframe_buffer_done
+};
+
+static void handle_copysession_buffer_size(void *data, struct ext_image_copy_capture_session_v1 *session, uint32_t width, uint32_t height) {
+	struct slorp_surface_state *slorp_surface = data;
+	slorp_surface->buffer_width = width;
+	slorp_surface->buffer_height = height;
+}
+
+static void handle_copysession_shm_format(void *data, struct ext_image_copy_capture_session_v1 *session, uint32_t format) {
+	struct slorp_surface_state *slorp_surface = data;
+	switch (format) {
+		case WL_SHM_FORMAT_ARGB8888:
+		case WL_SHM_FORMAT_XRGB8888:
+		case WL_SHM_FORMAT_ABGR8888:
+		case WL_SHM_FORMAT_XBGR8888:
+		case WL_SHM_FORMAT_XBGR2101010:
+		case WL_SHM_FORMAT_XRGB2101010:
+		case WL_SHM_FORMAT_ABGR2101010:
+		case WL_SHM_FORMAT_ARGB2101010:
+		if (!slorp_surface->valid_format) {
+			slorp_surface->buffer_format = format;
+			slorp_surface->buffer_stride = 4;
+			slorp_surface->valid_format = true;
+		}
+		break;
+		default:break;
+	}
+}
+
+static void handle_copysession_dmabuf_device(void *data, struct ext_image_copy_capture_session_v1 *session, struct wl_array *device) {
+	// don't care
+}
+
+static void handle_copysession_dmabuf_format(void *data, struct ext_image_copy_capture_session_v1 *session, uint32_t format, struct wl_array *modifiers) {
+	// don't care
+}
+
+static void handle_copysession_done(void *data, struct ext_image_copy_capture_session_v1 *session) {
+	struct slorp_surface_state *slorp_surface = data;
+	if (!slorp_surface->valid_format) {
+		fprintf(stderr, "Aborting: no valid format!\n");
+		slorp_surface->nwl.state->num_surfaces = 0;
+		return;
+	}
+	slorp_surface->buffer_stride *= slorp_surface->buffer_width;
+	allocate_capture_buffer(slorp_surface);
+	ext_image_copy_capture_frame_v1_attach_buffer(slorp_surface->copyframe, slorp_surface->shm_buffer);
+	ext_image_copy_capture_frame_v1_capture(slorp_surface->copyframe);
+
+}
+static void handle_copysession_stopped(void *data, struct ext_image_copy_capture_session_v1 *session) {
+	// don't care
+}
+
+
+static struct ext_image_copy_capture_session_v1_listener copysession_listener = {
+	handle_copysession_buffer_size,
+	handle_copysession_shm_format,
+	handle_copysession_dmabuf_device,
+	handle_copysession_dmabuf_format,
+	handle_copysession_done,
+	handle_copysession_stopped,
+};
+
+static void handle_copyframe_transform(void *data, struct ext_image_copy_capture_frame_v1 *ext_image_copy_capture_frame_v1, uint32_t transform) {
+	// don't care
+}
+
+static void handle_copyframe_damage(void *data, struct ext_image_copy_capture_frame_v1 *ext_image_copy_capture_frame_v1, int32_t x, int32_t y, int32_t width, int32_t height) {
+	// don't care
+}
+
+static void handle_copyframe_time(void *data, struct ext_image_copy_capture_frame_v1 *ext_image_copy_capture_frame_v1, uint32_t tv_sec_hi, uint32_t tv_sec_lo, uint32_t tv_nsec) {
+	// don't care
+}
+
+static void handle_copyframe_ready(void *data, struct ext_image_copy_capture_frame_v1 *ext_image_copy_capture_frame_v1) {
+	struct slorp_surface_state *slorp_surface = data;
+	freezeframe_ready(slorp_surface);
+}
+
+static void handle_copyframe_failed(void *data, struct ext_image_copy_capture_frame_v1 *ext_image_copy_capture_frame_v1, uint32_t reason) {
+	struct slorp_surface_state *slorp_surface = data;
+	fprintf(stderr, "Failed to capture frame: ");
+	switch (reason) {
+		case EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_UNKNOWN:
+			fprintf(stderr, "unknown reason\n");
+			break;
+		case EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS:
+			fprintf(stderr, "buffer constraints\n");
+			break;
+		case EXT_IMAGE_COPY_CAPTURE_FRAME_V1_FAILURE_REASON_STOPPED:
+			fprintf(stderr, "session was stopped\n");
+			break;
+	}
+	slorp_surface->nwl.state->num_surfaces = 0;
+}
+
+static struct ext_image_copy_capture_frame_v1_listener copyframe_listener = {
+	handle_copyframe_transform,
+	handle_copyframe_damage,
+	handle_copyframe_time,
+	handle_copyframe_ready,
+	handle_copyframe_failed,
 };
 
 static void get_rectangle(int32_t *x, int32_t *y, int32_t *x2, int32_t *y2) {
@@ -667,6 +787,10 @@ static void handle_destroy(struct nwl_surface *surface) {
 		close(slorp_surface->shm_fd);
 		munmap(slorp_surface->shm_data, slorp_surface->shm_size);
 	}
+	if (slorp_surface->copyframe) {
+		ext_image_copy_capture_frame_v1_destroy(slorp_surface->copyframe);
+		ext_image_copy_capture_session_v1_destroy(slorp_surface->copysession);
+	}
 	nwl_cairo_renderer_finish(&slorp_surface->cairo);
 	free(slorp_surface);
 }
@@ -683,7 +807,6 @@ static void update_bgsurface(struct nwl_surface *surface) {
 	dat->has_bg = true;
 	surface->scale = dat->nwl.scale;
 }
-
 
 static void init_slorp_surface(struct nwl_state *state, struct nwl_output *output) {
 	struct slorp_surface_state *surface_state = calloc(sizeof(struct slorp_surface_state), 1);
@@ -702,14 +825,23 @@ static void init_slorp_surface(struct nwl_state *state, struct nwl_output *outpu
 	surface_state->output = output;
 	surface_state->nwl.flags |= NWL_SURFACE_FLAG_NO_AUTOCURSOR;
 	surface_state->nwl.scale = output->scale;
-	if (g_slorp.screencopy) {
+	if (g_slorp.screencopy || (g_slorp.output_capture || g_slorp.copy_capture)) {
 		nwl_surface_init(&surface_state->bgsurface, state, "slorp static bg");
 		surface_state->bgsurface.scale = output->scale;
 		nwl_surface_role_subsurface(&surface_state->bgsurface, &surface_state->nwl);
 		wl_subsurface_place_below(surface_state->bgsurface.role.subsurface.wl, surface_state->nwl.wl.surface);
 		surface_state->bgsurface.impl.update = update_bgsurface;
-		surface_state->screenframe = zwlr_screencopy_manager_v1_capture_output(g_slorp.screencopy, 0, output->output);
-		zwlr_screencopy_frame_v1_add_listener(surface_state->screenframe, &screenframe_listener, surface_state);
+		if (g_slorp.output_capture) {
+			struct ext_image_capture_source_v1 *source =  ext_output_image_capture_source_manager_v1_create_source(g_slorp.output_capture, output->output);
+			surface_state->copysession = ext_image_copy_capture_manager_v1_create_session(g_slorp.copy_capture, source, 0);
+			surface_state->copyframe = ext_image_copy_capture_session_v1_create_frame(surface_state->copysession);
+			ext_image_copy_capture_session_v1_add_listener(surface_state->copysession, &copysession_listener, surface_state);
+			ext_image_copy_capture_frame_v1_add_listener(surface_state->copyframe, &copyframe_listener, surface_state);
+			ext_image_capture_source_v1_destroy(source);
+		} else {
+			surface_state->screenframe = zwlr_screencopy_manager_v1_capture_output(g_slorp.screencopy, 0, output->output);
+			zwlr_screencopy_frame_v1_add_listener(surface_state->screenframe, &screenframe_listener, surface_state);
+		}
 	}
 	wl_surface_commit(surface_state->nwl.wl.surface);
 }
@@ -719,6 +851,12 @@ static bool handle_global_add(struct nwl_state *state, struct wl_registry *regis
 	UNUSED(state);
 	if (strcmp(interface, zwlr_screencopy_manager_v1_interface.name) == 0) {
 		g_slorp.screencopy = wl_registry_bind(registry, name, &zwlr_screencopy_manager_v1_interface, version);
+		return true;
+	} else if (strcmp(interface, ext_image_copy_capture_manager_v1_interface.name) == 0) {
+		g_slorp.copy_capture = wl_registry_bind(registry, name, &ext_image_copy_capture_manager_v1_interface, 1);
+		return true;
+	} else if (strcmp(interface, ext_output_image_capture_source_manager_v1_interface.name) == 0) {
+		g_slorp.output_capture = wl_registry_bind(registry, name, &ext_output_image_capture_source_manager_v1_interface, 1);
 		return true;
 	}
 	return false;
@@ -1004,6 +1142,12 @@ int main (int argc, char *argv[]) {
 	nwl_wayland_run(&state);
 	if (g_slorp.screencopy) {
 		zwlr_screencopy_manager_v1_destroy(g_slorp.screencopy);
+	}
+	if (g_slorp.output_capture) {
+		ext_output_image_capture_source_manager_v1_destroy(g_slorp.output_capture);
+	}
+	if (g_slorp.copy_capture) {
+		ext_image_copy_capture_manager_v1_destroy(g_slorp.copy_capture);
 	}
 	int retval = EXIT_SUCCESS;
 	if (g_slorp.has_selection) {

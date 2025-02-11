@@ -1,7 +1,13 @@
+wayland_protocols = dependency('wayland-protocols')
+proto_dir = wayland_protocols.get_pkgconfig_variable('pkgdatadir')
 wlscanner = find_program('wayland-scanner')
 # This needs to be done better..
 protos = [
-	'wlr-screencopy-unstable-v1.xml'
+	'wlr-screencopy-unstable-v1.xml',
+	proto_dir / 'staging/ext-image-copy-capture/ext-image-copy-capture-v1.xml',
+	proto_dir / 'staging/ext-image-capture-source/ext-image-capture-source-v1.xml',
+	# This should be optional...
+	proto_dir / 'staging/ext-foreign-toplevel-list/ext-foreign-toplevel-list-v1.xml',
 ]
 wl_gen_c = generator(wlscanner,
 	output: '@BASENAME@.c',
