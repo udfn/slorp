@@ -8,6 +8,7 @@ project('slorp', 'c',
 wayland_client = dependency('wayland-client')
 cairo = dependency('cairo')
 pixman = dependency('pixman-1')
+xkbcommon = dependency('xkbcommon')
 png = dependency('libpng')
 want_jxl = get_option('libjxl')
 jxl = dependency('libjxl', required: want_jxl)
@@ -27,7 +28,8 @@ deps = [
 	cairo,
 	nwl,
 	pixman,
-	png
+	png,
+	xkbcommon,
 ]
 conf_data = configuration_data()
 if jxl.found()

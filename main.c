@@ -15,6 +15,7 @@
 #include <unistd.h>
 #include <pixman.h>
 #include <png.h>
+#include <xkbcommon/xkbcommon-keysyms.h>
 #include "config.h"
 
 #if HAVE_JXL
@@ -769,7 +770,7 @@ static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, s
 	}
 	if (event->changed & NWL_POINTER_EVENT_BUTTON) {
 		if (!(event->buttons & NWL_MOUSE_RIGHT) && (event->buttons_prev & NWL_MOUSE_RIGHT)) {
-			// Right mouse button always abortd
+			// Right mouse button always aborts
 			slorp_surface->nwl.state->num_surfaces = 0;
 			return;
 		}
@@ -778,6 +779,19 @@ static void handle_pointer(struct nwl_surface *surface, struct nwl_seat *seat, s
 		handle_pointer_color(slorp_surface, seat, event);
 	} else {
 		handle_pointer_rectangle(slorp_surface, seat, event);
+	}
+}
+
+static void handle_keyboard(struct nwl_surface *surface, struct nwl_seat *seat, struct nwl_keyboard_event *event) {
+	struct slorp_surface_state *slorp_surface = wl_container_of(surface, slorp_surface, nwl);
+	if (event->type == NWL_KEYBOARD_EVENT_KEYDOWN || event->type == NWL_KEYBOARD_EVENT_KEYUP) {
+		if (event->keysym == XKB_KEY_Escape) {
+			slorp_surface->nwl.state->num_surfaces = 0;
+			return;
+		}
+		if (event->keysym == XKB_KEY_space) {
+			g_slorp.moving_selection = event->type == NWL_KEYBOARD_EVENT_KEYDOWN;
+		}
 	}
 }
 
@@ -819,6 +833,7 @@ static void init_slorp_surface(struct nwl_state *state, struct nwl_output *outpu
 	if (!g_slorp.options.no_keyboard_interactivity) {
 		zwlr_layer_surface_v1_set_keyboard_interactivity(surface_state->nwl.role.layer.wl, 1);
 	}
+	surface_state->nwl.impl.input_keyboard = handle_keyboard;
 	surface_state->nwl.impl.input_pointer = handle_pointer;
 	surface_state->nwl.impl.destroy = handle_destroy;
 	surface_state->nwl.impl.update = slorp_sel_update;
